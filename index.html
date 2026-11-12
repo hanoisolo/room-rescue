@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Room Rescue — AI decluttering advisor</title>
+  <meta name="description" content="Upload a photo of a room and get AI-powered organization and decluttering suggestions.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <h1>Room Rescue</h1>
+      <p class="tagline">Upload a photo of a room. Get a prioritized plan to clear it.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="card credential-card" aria-labelledby="credential-heading">
+      <h2 id="credential-heading">Your Mistral API key</h2>
+      <p class="hint">
+        The key stays in this browser only. It is stored in local storage and sent directly to
+        <code>api.mistral.ai</code> — never to any other server.
+      </p>
+      <div class="credential-row">
+        <label class="visually-hidden" for="mistral-key-input">Mistral API key</label>
+        <input
+          id="mistral-key-input"
+          type="text"
+          class="masked-credential"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Paste your Mistral API key">
+        <button id="save-key-btn" type="button" class="btn btn-secondary">Save</button>
+        <button id="clear-key-btn" type="button" class="btn btn-ghost">Clear</button>
+      </div>
+      <p id="key-status-text" class="key-status" role="status">No key saved yet.</p>
+    </section>
+
+    <section class="card upload-card" aria-labelledby="upload-heading">
+      <h2 id="upload-heading">Add a room photo</h2>
+
+      <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-describedby="dropzone-help">
+        <p class="dropzone-title">Drop a photo here, or click to choose one</p>
+        <p id="dropzone-help" class="hint">JPEG, PNG, or WebP. Large photos are resized automatically.</p>
+        <label class="visually-hidden" for="room-photo-input">Room photo</label>
+        <input id="room-photo-input" type="file" accept="image/jpeg,image/png,image/webp">
+      </div>
+
+      <div class="controls-row">
+        <label for="room-hint-select">Room type</label>
+        <select id="room-hint-select">
+          <option value="">Auto-detect</option>
+          <option value="Home Office">Home Office</option>
+          <option value="Bedroom">Bedroom</option>
+          <option value="Kitchen">Kitchen</option>
+          <option value="Living Room">Living Room</option>
+          <option value="Closet or Storage">Closet or Storage</option>
+          <option value="Garage">Garage</option>
+        </select>
+      </div>
+
+      <div class="actions-row">
+        <button id="analyze-btn" type="button" class="btn btn-primary">Analyze this room</button>
+        <button id="load-demo-btn" type="button" class="btn btn-demo">Load Sample / Demo</button>
+      </div>
+      <p class="hint">The demo needs no API key and no network connection.</p>
+    </section>
+
+    <section id="progress-panel" class="card progress-panel" hidden aria-live="polite">
+      <h2>Working</h2>
+      <ol class="stage-list">
+        <li data-stage="downscaling">Resizing the photo</li>
+        <li data-stage="ocr">Scanning labels with Mistral OCR 4</li>
+        <li data-stage="vision">Analyzing the room with Mistral Large 4</li>
+        <li data-stage="done">Building your plan</li>
+      </ol>
+    </section>
+
+    <div id="status-banner" class="status-banner" role="status" hidden></div>
+
+    <section id="results-section" class="results" hidden aria-labelledby="results-heading">
+      <h2 id="results-heading" class="visually-hidden">Your decluttering plan</h2>
+
+      <div class="results-top">
+        <figure class="preview-figure">
+          <img id="preview-image" alt="The room photo you analyzed">
+          <figcaption>
+            <span id="grounding-badge" class="grounding-badge">Analysis</span>
+          </figcaption>
+        </figure>
+
+        <div id="summary-card" class="card summary-card">
+          <h3>Room summary</h3>
+          <p id="summary-text"></p>
+          <dl class="summary-stats">
+            <div><dt>Clutter level</dt><dd id="clutter-level">—</dd></div>
+            <div><dt>Total effort</dt><dd id="total-minutes">—</dd></div>
+          </dl>
+        </div>
+      </div>
+
+      <div id="quick-win-card" class="card quick-win-card">
+        <h3>Start here — your 5-minute win</h3>
+        <p id="quick-win-title"></p>
+        <p id="quick-win-why" class="hint"></p>
+      </div>
+
+      <details id="ocr-details-drawer" class="card ocr-drawer">
+        <summary>Labels read from the photo</summary>
+        <pre id="ocr-text"></pre>
+      </details>
+
+      <div class="card checklist-card">
+        <h3>Decluttering checklist</h3>
+        <p id="checklist-progress" class="checklist-progress">0 of 0 steps done</p>
+        <div id="actions-container" class="actions-container"></div>
+      </div>
+
+      <div class="card">
+        <h3>Zones</h3>
+        <div id="zones-container" class="zones-container"></div>
+      </div>
+
+      <div class="card">
+        <h3>Items to deal with</h3>
+        <div id="items-container" class="items-container"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <p>Room Rescue runs entirely in your browser. Photos are sent to Mistral for analysis only.</p>
+    </div>
+  </footer>
+
+  <script defer src="src/core.js"></script>
+  <script defer src="src/api.js"></script>
+  <script defer src="src/demo-fixture.js"></script>
+  <script defer src="src/app.js"></script>
+</body>
+</html>
