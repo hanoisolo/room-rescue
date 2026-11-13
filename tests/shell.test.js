@@ -53,7 +53,7 @@ test('index_html_declares_every_required_dom_id', function () {
 test('index_html_loads_classic_scripts_in_dependency_order', function () {
   const html = read('index.html');
   const tags = html.match(/<script\b[^>]*>/g) || [];
-  assert.equal(tags.length, 4, 'expected exactly four script tags');
+  assert.equal(tags.length, 6, 'expected exactly six script tags');
 
   const sources = tags.map(function (tag) {
     const match = tag.match(/src="([^"]+)"/);
@@ -63,7 +63,14 @@ test('index_html_loads_classic_scripts_in_dependency_order', function () {
     return match[1];
   });
 
-  assert.deepEqual(sources, ['src/core.js', 'src/api.js', 'src/demo-fixture.js', 'src/app.js']);
+  assert.deepEqual(sources, [
+    'src/core.js',
+    'src/api.js',
+    'src/storage.js',
+    'src/export.js',
+    'src/demo-fixture.js',
+    'src/app.js'
+  ]);
 });
 
 test('credential_input_is_masked_without_a_native_hidden_field', function () {

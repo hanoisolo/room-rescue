@@ -16,6 +16,18 @@
   </header>
 
   <main class="wrap">
+    <section id="session-bar" class="card session-bar" hidden aria-live="polite">
+      <div class="session-bar-row">
+        <p id="session-resume-text" class="session-resume-text">No saved rooms yet.</p>
+        <div class="session-bar-actions">
+          <label class="visually-hidden" for="session-switcher">Saved rooms</label>
+          <select id="session-switcher"></select>
+          <button id="resume-session-btn" type="button" class="btn btn-secondary">Resume</button>
+          <button id="new-session-btn" type="button" class="btn btn-ghost">Start a new room</button>
+        </div>
+      </div>
+    </section>
+
     <section class="card credential-card" aria-labelledby="credential-heading">
       <h2 id="credential-heading">Your Mistral API key</h2>
       <p class="hint">
@@ -63,7 +75,10 @@
       <div class="actions-row">
         <button id="analyze-btn" type="button" class="btn btn-primary">Analyze this room</button>
         <button id="load-demo-btn" type="button" class="btn btn-demo">Load Sample / Demo</button>
+        <button id="rescan-btn" type="button" class="btn btn-secondary" hidden>Scan progress update</button>
       </div>
+      <label class="visually-hidden" for="rescan-photo-input">Progress photo</label>
+      <input id="rescan-photo-input" type="file" accept="image/jpeg,image/png,image/webp" hidden>
       <p class="hint">The demo needs no API key and no network connection.</p>
     </section>
 
@@ -82,6 +97,11 @@
     <section id="results-section" class="results" hidden aria-labelledby="results-heading">
       <h2 id="results-heading" class="visually-hidden">Your decluttering plan</h2>
 
+      <div class="results-actions">
+        <button id="print-btn" type="button" class="btn btn-secondary">Print checklist</button>
+        <button id="copy-md-btn" type="button" class="btn btn-ghost">Copy as Markdown</button>
+      </div>
+
       <div class="results-top">
         <figure class="preview-figure">
           <img id="preview-image" alt="The room photo you analyzed">
@@ -99,6 +119,16 @@
             <div><dt>Remaining</dt><dd id="remaining-minutes">—</dd></div>
           </dl>
         </div>
+      </div>
+
+      <div id="before-after-container" class="card before-after-card" hidden>
+        <h3>Before and after</h3>
+        <div class="before-after-stage">
+          <img id="before-image" class="before-after-img is-before" alt="The room before this progress update">
+          <img id="after-image" class="before-after-img is-after" alt="The room after this progress update">
+        </div>
+        <label class="visually-hidden" for="compare-slider">Compare before and after</label>
+        <input id="compare-slider" type="range" min="0" max="100" value="50" class="compare-slider">
       </div>
 
       <div id="quick-win-card" class="card quick-win-card">
@@ -133,11 +163,19 @@
   <footer class="site-footer">
     <div class="wrap">
       <p>Room Rescue runs entirely in your browser. Photos are sent to Mistral for analysis only.</p>
+      <div class="footer-export-row">
+        <button id="export-json-btn" type="button" class="btn btn-ghost">Export .json</button>
+        <button id="import-json-btn" type="button" class="btn btn-ghost">Import .json</button>
+        <label class="visually-hidden" for="import-json-input">Import a room session file</label>
+        <input id="import-json-input" type="file" accept="application/json,.json" hidden>
+      </div>
     </div>
   </footer>
 
   <script defer src="src/core.js"></script>
   <script defer src="src/api.js"></script>
+  <script defer src="src/storage.js"></script>
+  <script defer src="src/export.js"></script>
   <script defer src="src/demo-fixture.js"></script>
   <script defer src="src/app.js"></script>
 </body>

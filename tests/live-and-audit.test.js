@@ -248,7 +248,7 @@ test('every_script_src_exists_on_disk', function () {
     return tag.match(/src="([^"]+)"/)[1];
   });
 
-  assert.equal(sources.length, 4);
+  assert.equal(sources.length, 6);
   sources.forEach(function (src) {
     assert.equal(fs.existsSync(path.join(ROOT, src)), true, 'missing script file: ' + src);
   });

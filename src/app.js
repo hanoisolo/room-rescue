@@ -3,6 +3,8 @@
 
   var core = (typeof module === 'object' && module.exports) ? require('./core.js') : root.RoomRescueCore;
   var api = (typeof module === 'object' && module.exports) ? require('./api.js') : root.RoomRescueApi;
+  var storage = (typeof module === 'object' && module.exports) ? require('./storage.js') : root.RoomRescueStorage;
+  var exporter = (typeof module === 'object' && module.exports) ? require('./export.js') : root.RoomRescueExport;
   var demo = (typeof module === 'object' && module.exports) ? require('./demo-fixture.js') : root.RoomRescueDemo;
 
   var initializedDocs = new WeakSet();
@@ -15,7 +17,11 @@
     IMAGE_TOO_LARGE: 'That photo is too large even after resizing. Try a smaller photo.',
     UNSUPPORTED_IMAGE: 'That file type is not supported. Use a JPEG, PNG, or WebP photo.',
     PARSE_ERROR: 'The model returned a response that could not be read. Try analyzing again.',
-    API_ERROR: 'Mistral returned an error. Try again in a moment.'
+    API_ERROR: 'Mistral returned an error. Try again in a moment.',
+    CLIPBOARD_UNAVAILABLE: 'This browser would not let Room Rescue copy to the clipboard. Select the checklist and copy it by hand.',
+    INVALID_IMPORT: 'That file is not a Room Rescue session. Pick a .json file exported from this app.',
+    DOWNLOAD_UNAVAILABLE: 'This browser cannot save files. Try a different browser.',
+    PRINT_UNAVAILABLE: 'This browser cannot open the print dialog.'
   };
 
   var STAGE_ORDER = ['downscaling', 'ocr', 'vision', 'done'];
@@ -57,6 +63,34 @@
     }
     if (s.code === 'demo') {
       setBanner(doc, 'success', 'Sample room loaded. This is bundled demo data — no API key and no network were used.');
+      return;
+    }
+    if (s.code === 'resumed') {
+      setBanner(doc, 'success', 'Room resumed. Your checklist progress is restored.');
+      return;
+    }
+    if (s.code === 'rescan') {
+      setBanner(doc, 'success', 'Progress update saved. Your plan now reflects the new photo.');
+      return;
+    }
+    if (s.code === 'imported') {
+      setBanner(doc, 'success', 'Room imported. Your checklist is ready.');
+      return;
+    }
+    if (s.code === 'copied') {
+      setBanner(doc, 'success', 'Checklist copied as Markdown.');
+      return;
+    }
+    if (s.code === 'exported') {
+      setBanner(doc, 'success', 'Room exported as a .json file.');
+      return;
+    }
+    if (s.code === 'NO_SESSION') {
+      setBanner(doc, 'info', 'Analyze a room first, then scan a progress photo.');
+      return;
+    }
+    if (s.code === 'NO_PLAN') {
+      setBanner(doc, 'info', 'Analyze a room or load the sample first.');
       return;
     }
     if (s.code === 'success') {
@@ -265,6 +299,362 @@
     if (results) results.hidden = false;
   }
 
+  // --- Saved rooms --------------------------------------------------------
+
+  function revealRescan(doc, visible) {
+    var button = doc.getElementById('rescan-btn');
+    if (!button) return;
+    button.hidden = !visible;
+    // Hiding must also clear a disabled state left behind by a superseded request.
+    if (!visible) button.disabled = false;
+  }
+
+  function hideBeforeAfter(doc) {
+    var container = doc.getElementById('before-after-container');
+    if (container) container.hidden = true;
+  }
+
+  // A superseded request never reaches its own settle(), so any action that
+  // invalidates an in-flight analysis must clear the loading UI itself.
+  function clearLoadingState(doc) {
+    var progress = doc.getElementById('progress-panel');
+    if (progress) progress.hidden = true;
+    var analyzeBtn = doc.getElementById('analyze-btn');
+    if (analyzeBtn) analyzeBtn.disabled = false;
+    var rescanBtn = doc.getElementById('rescan-btn');
+    if (rescanBtn) rescanBtn.disabled = false;
+  }
+
+  function upsertSession(ctx, session) {
+    var sessions = (ctx.state.sessions || []).filter(function (item) {
+      return item.id !== session.id;
+    });
+    sessions.push(session);
+    sessions.sort(function (a, b) {
+      var left = Date.parse(a.updatedAt);
+      var right = Date.parse(b.updatedAt);
+      if (!isFinite(left)) left = 0;
+      if (!isFinite(right)) right = 0;
+      return right - left;
+    });
+    ctx.state.sessions = sessions;
+  }
+
+  // Only the session bar is touched here: hydration must never disturb whatever
+  // the user is already looking at.
+  function renderSessionBar(doc, ctx) {
+    var bar = doc.getElementById('session-bar');
+    if (!bar) return;
+
+    var sessions = ctx.state.sessions || [];
+    var text = doc.getElementById('session-resume-text');
+    var switcher = doc.getElementById('session-switcher');
+
+    if (!sessions.length) {
+      bar.hidden = true;
+      if (text) text.textContent = 'No saved rooms yet.';
+      if (switcher) switcher.textContent = '';
+      return;
+    }
+
+    bar.hidden = false;
+
+    var active = ctx.state.activeSession;
+    var target = active || sessions[0];
+    var progress = storage.computeSessionProgress(target);
+    var label = progress.roomType || 'Room';
+
+    if (text) {
+      text.textContent = active
+        ? 'Resumed ' + label + ' — ' + progress.doneCount + ' of ' + progress.totalCount + ' done'
+        : 'Resume previous room (' + progress.doneCount + ' of ' + progress.totalCount + ' done)';
+    }
+
+    if (switcher) {
+      switcher.textContent = '';
+      sessions.forEach(function (session) {
+        var sessionProgress = storage.computeSessionProgress(session);
+        var option = doc.createElement('option');
+        option.setAttribute('value', session.id);
+        option.textContent = (sessionProgress.roomType || 'Room') + ' — ' +
+          sessionProgress.doneCount + ' of ' + sessionProgress.totalCount + ' done';
+        if (active && session.id === active.id) option.setAttribute('selected', 'selected');
+        switcher.appendChild(option);
+      });
+      if (active) switcher.value = active.id;
+      else if (sessions.length) switcher.value = sessions[0].id;
+    }
+  }
+
+  function renderBeforeAfter(doc, session) {
+    var container = doc.getElementById('before-after-container');
+    if (!container) return;
+
+    var scans = session && Array.isArray(session.scans) ? session.scans : [];
+    if (scans.length < 2) {
+      container.hidden = true;
+      return;
+    }
+
+    var index = typeof session.activeScanIndex === 'number' ? session.activeScanIndex : scans.length - 1;
+    var after = scans[index] || scans[scans.length - 1];
+    var before = scans[index - 1] || scans[0];
+
+    var beforeImg = doc.getElementById('before-image');
+    if (beforeImg && before) beforeImg.setAttribute('src', before.imageDataUrl);
+    var afterImg = doc.getElementById('after-image');
+    if (afterImg && after) afterImg.setAttribute('src', after.imageDataUrl);
+
+    container.hidden = false;
+  }
+
+  function renderSessionState(doc, ctx) {
+    var session = ctx.state.activeSession;
+    if (!session) return null;
+
+    var index = typeof session.activeScanIndex === 'number' ? session.activeScanIndex : session.scans.length - 1;
+    var scan = session.scans[index] || session.scans[session.scans.length - 1];
+    if (!scan) return null;
+
+    ctx.state.currentPlan = scan.plan;
+    ctx.state.checked = session.checked || {};
+    ctx.state.lastImageDataUrl = scan.imageDataUrl;
+
+    renderAnalysisResult(doc, scan.plan, scan.imageDataUrl, ctx.state);
+    renderBeforeAfter(doc, session);
+    revealRescan(doc, true);
+    renderSessionBar(doc, ctx);
+    return scan;
+  }
+
+  function persistActiveSession(ctx) {
+    var session = ctx.state.activeSession;
+    if (!session) return Promise.resolve(null);
+
+    return storage.saveSession(session, { indexedDB: ctx.indexedDB })
+      .then(function (saved) {
+        if (!saved) return null;
+        ctx.state.activeSession = saved;
+        upsertSession(ctx, saved);
+        renderSessionBar(ctx.document, ctx);
+        return saved;
+      })
+      .catch(function () { return null; });
+  }
+
+  function loadSavedSessions(ctx) {
+    return storage.listSessions({ indexedDB: ctx.indexedDB })
+      .then(function (sessions) {
+        ctx.state.sessions = sessions;
+        renderSessionBar(ctx.document, ctx);
+        return sessions;
+      })
+      .catch(function () {
+        ctx.state.sessions = [];
+        return [];
+      });
+  }
+
+  function handleResumeSession(ctx, sessionId) {
+    var id = sessionId;
+    if (!id) {
+      var switcher = ctx.document.getElementById('session-switcher');
+      id = switcher && switcher.value ? switcher.value : '';
+    }
+    if (!id) return Promise.resolve(null);
+
+    return storage.getSession(id, { indexedDB: ctx.indexedDB }).then(function (session) {
+      if (!session) return null;
+      // Invalidate any in-flight analysis so it cannot overwrite the resumed room.
+      ctx.state.requestId += 1;
+      ctx.state.activeSession = session;
+      ctx.state.rescanFile = null;
+      renderSessionState(ctx.document, ctx);
+      clearLoadingState(ctx.document);
+      renderStatusBanner(ctx.document, { code: 'resumed' });
+      return session;
+    });
+  }
+
+  function handleNewSession(ctx) {
+    var doc = ctx.document;
+    ctx.state.requestId += 1;
+    ctx.state.activeSession = null;
+    ctx.state.currentPlan = null;
+    ctx.state.checked = {};
+    ctx.state.rescanFile = null;
+    ctx.state.lastImageDataUrl = '';
+
+    var results = doc.getElementById('results-section');
+    if (results) results.hidden = true;
+    revealRescan(doc, false);
+    hideBeforeAfter(doc);
+    clearLoadingState(doc);
+    setBanner(doc, null, '');
+    renderSessionBar(doc, ctx);
+    return null;
+  }
+
+  function startSession(ctx, plan, roomHint) {
+    var session;
+    try {
+      session = storage.createSession({
+        roomType: plan.room_type || roomHint || '',
+        imageDataUrl: ctx.state.lastImageDataUrl,
+        plan: plan,
+        ocrText: plan.meta && plan.meta.ocr_text ? plan.meta.ocr_text : ''
+      });
+    } catch (err) {
+      // A plan with no stored photo still renders; it just cannot be resumed.
+      ctx.state.activeSession = null;
+      revealRescan(ctx.document, false);
+      return Promise.resolve(null);
+    }
+
+    ctx.state.activeSession = session;
+    revealRescan(ctx.document, true);
+    hideBeforeAfter(ctx.document);
+    return persistActiveSession(ctx);
+  }
+
+  function readTextFile(file, readTextImpl) {
+    if (typeof readTextImpl === 'function') return Promise.resolve(readTextImpl(file));
+    if (typeof FileReader === 'undefined') {
+      return Promise.reject(new Error('This browser cannot read local files.'));
+    }
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(String(reader.result)); };
+      reader.onerror = function () { reject(new Error('That file could not be read.')); };
+      reader.readAsText(file);
+    });
+  }
+
+  function handleImportSessionText(ctx, jsonText) {
+    var doc = ctx.document;
+    var session;
+    try {
+      session = exporter.parseImportedSessionJson(jsonText);
+    } catch (err) {
+      renderStatusBanner(doc, { code: 'INVALID_IMPORT' });
+      return Promise.reject(err);
+    }
+
+    // Invalidate any in-flight analysis so it cannot overwrite the imported room.
+    ctx.state.requestId += 1;
+    ctx.state.activeSession = session;
+    ctx.state.rescanFile = null;
+    renderSessionState(doc, ctx);
+    clearLoadingState(doc);
+    renderStatusBanner(doc, { code: 'imported' });
+    return persistActiveSession(ctx).then(function () { return session; });
+  }
+
+  function handleRescanSubmit(ctx, file) {
+    var doc = ctx.document;
+    var session = ctx.state.activeSession;
+
+    if (!session) {
+      renderStatusBanner(doc, { code: 'NO_SESSION' });
+      return Promise.reject(new Error('There is no active room to update.'));
+    }
+
+    var keyInput = doc.getElementById('mistral-key-input');
+    var typed = keyInput && typeof keyInput.value === 'string' ? keyInput.value.trim() : '';
+    var mistralKey = typed || api.loadMistralKey(ctx.storage);
+
+    if (!mistralKey) {
+      var missing = new api.RoomRescueError('MISSING_KEY', 'Paste your Mistral API key to analyze a room.');
+      renderStatusBanner(doc, { code: 'MISSING_KEY', message: missing.userMessage });
+      return Promise.reject(missing);
+    }
+
+    var rescanInput = doc.getElementById('rescan-photo-input');
+    var chosen = file || ctx.state.rescanFile ||
+      (rescanInput && rescanInput.files && rescanInput.files.length ? rescanInput.files[0] : null);
+
+    var hintSelect = doc.getElementById('room-hint-select');
+    var roomHint = hintSelect && hintSelect.value ? hintSelect.value : (session.roomType || '');
+
+    var activeIndex = typeof session.activeScanIndex === 'number'
+      ? session.activeScanIndex
+      : session.scans.length - 1;
+    var previousScan = session.scans[activeIndex] || session.scans[session.scans.length - 1];
+
+    var requestId = ctx.state.requestId + 1;
+    ctx.state.requestId = requestId;
+
+    var progress = doc.getElementById('progress-panel');
+    var rescanBtn = doc.getElementById('rescan-btn');
+    if (progress) progress.hidden = false;
+    if (rescanBtn) rescanBtn.disabled = true;
+    setStage(doc, 'downscaling');
+
+    function settle() {
+      if (requestId !== ctx.state.requestId) return;
+      clearLoadingState(doc);
+    }
+
+    var downscale = ctx.downscaleImpl || api.downscaleImageFile;
+    var resolvedImage = '';
+    var imagePromise = chosen
+      ? Promise.resolve()
+          .then(function () { return downscale(chosen, ctx.downscaleDeps); })
+          .then(function (result) {
+            resolvedImage = result.dataUrl;
+            return result.dataUrl;
+          })
+      : Promise.resolve('');
+
+    return imagePromise.then(function (dataUrl) {
+      return api.analyzeRoomPhoto({
+        imageDataUrl: dataUrl,
+        mistralKey: mistralKey,
+        roomHint: roomHint,
+        fetchImpl: ctx.fetch,
+        previousScan: {
+          imageDataUrl: previousScan.imageDataUrl,
+          plan: previousScan.plan,
+          checked: session.checked || {}
+        },
+        downscaleDataUrlImpl: ctx.downscaleDataUrlImpl,
+        onStage: function (stage) {
+          if (requestId === ctx.state.requestId) setStage(doc, stage);
+        }
+      });
+    }).then(function (plan) {
+      if (requestId !== ctx.state.requestId) return plan;
+      settle();
+      if (resolvedImage) ctx.state.lastImageDataUrl = resolvedImage;
+
+      var updated = storage.appendScanToSession(session, {
+        roomType: plan.room_type || session.roomType,
+        imageDataUrl: ctx.state.lastImageDataUrl,
+        plan: plan,
+        ocrText: plan.meta && plan.meta.ocr_text ? plan.meta.ocr_text : ''
+      });
+
+      ctx.state.activeSession = updated;
+      ctx.state.rescanFile = null;
+      ctx.state.currentPlan = plan;
+      ctx.state.checked = updated.checked;
+      ctx.state.lastImageDataUrl = updated.scans[updated.activeScanIndex].imageDataUrl;
+
+      renderStatusBanner(doc, { code: 'rescan' });
+      renderAnalysisResult(doc, plan, ctx.state.lastImageDataUrl, ctx.state);
+      renderBeforeAfter(doc, updated);
+      revealRescan(doc, true);
+      renderSessionBar(doc, ctx);
+      persistActiveSession(ctx);
+      return plan;
+    }).catch(function (err) {
+      if (requestId !== ctx.state.requestId) throw err;
+      settle();
+      renderStatusBanner(doc, { code: err && err.code ? err.code : 'API_ERROR', message: err && err.userMessage });
+      throw err;
+    });
+  }
+
   function handleLoadDemo(ctx) {
     var doc = ctx.document;
     var fixture = demo.getDemoFixture();
@@ -272,14 +662,17 @@
     ctx.state.requestId += 1;
     ctx.state.checked = {};
     ctx.state.lastImageDataUrl = fixture.imageDataUrl;
+    // The demo is ephemeral: it must never be written into saved room history.
+    ctx.state.activeSession = null;
+    ctx.state.rescanFile = null;
+    ctx.state.currentPlan = fixture.plan;
 
-    var progress = doc.getElementById('progress-panel');
-    if (progress) progress.hidden = true;
-    var analyzeBtn = doc.getElementById('analyze-btn');
-    if (analyzeBtn) analyzeBtn.disabled = false;
-
+    revealRescan(doc, false);
+    hideBeforeAfter(doc);
+    clearLoadingState(doc);
     renderStatusBanner(doc, { code: 'demo' });
     renderAnalysisResult(doc, fixture.plan, fixture.imageDataUrl, ctx.state);
+    renderSessionBar(doc, ctx);
     return fixture;
   }
 
@@ -315,28 +708,38 @@
 
     function settle() {
       if (requestId !== ctx.state.requestId) return;
-      if (progress) progress.hidden = true;
-      if (analyzeBtn) analyzeBtn.disabled = false;
+      clearLoadingState(doc);
     }
 
     var downscale = ctx.downscaleImpl || api.downscaleImageFile;
+    // The photo is held locally until the request is known to still be current,
+    // so a demo click during downscaling cannot leave a stale image on the state.
+    var resolvedImage = '';
     var imagePromise = file
-      ? Promise.resolve().then(function () { return downscale(file, ctx.downscaleDeps); }).then(function (result) { return result.dataUrl; })
+      ? Promise.resolve()
+          .then(function () { return downscale(file, ctx.downscaleDeps); })
+          .then(function (result) {
+            resolvedImage = result.dataUrl;
+            return result.dataUrl;
+          })
       : Promise.resolve('');
 
     return imagePromise.then(function (dataUrl) {
-      if (dataUrl) ctx.state.lastImageDataUrl = dataUrl;
       return api.analyzeRoomPhoto({
         imageDataUrl: dataUrl,
         mistralKey: mistralKey,
         roomHint: roomHint,
         fetchImpl: ctx.fetch,
-        onStage: function (stage) { setStage(doc, stage); }
+        onStage: function (stage) {
+          if (requestId === ctx.state.requestId) setStage(doc, stage);
+        }
       });
     }).then(function (plan) {
       if (requestId !== ctx.state.requestId) return plan;
       settle();
+      if (resolvedImage) ctx.state.lastImageDataUrl = resolvedImage;
       ctx.state.checked = {};
+      ctx.state.currentPlan = plan;
 
       var mode = plan.meta && plan.meta.grounding_mode;
       if (mode === 'vision_only_ocr_empty') renderStatusBanner(doc, { code: 'vision_only_ocr_empty' });
@@ -344,6 +747,7 @@
       else renderStatusBanner(doc, { code: 'success' });
 
       renderAnalysisResult(doc, plan, ctx.state.lastImageDataUrl, ctx.state);
+      startSession(ctx, plan, roomHint);
       return plan;
     }).catch(function (err) {
       if (requestId !== ctx.state.requestId) throw err;
@@ -364,10 +768,29 @@
     var ctx = {
       document: doc,
       storage: env.storage || (typeof localStorage !== 'undefined' ? localStorage : null),
+      // An explicit `indexedDB: null` means "no room history", so it must not fall
+      // through to whatever the host happens to expose.
+      indexedDB: Object.prototype.hasOwnProperty.call(env, 'indexedDB')
+        ? env.indexedDB
+        : (typeof indexedDB !== 'undefined' ? indexedDB : null),
       fetch: env.fetch,
       downscaleImpl: env.downscaleImpl,
       downscaleDeps: env.downscaleDeps,
-      state: { checked: {}, lastImageDataUrl: '', selectedFile: null, requestId: 0 }
+      downscaleDataUrlImpl: env.downscaleDataUrlImpl,
+      clipboard: env.clipboard,
+      printImpl: env.printImpl,
+      downloadImpl: env.downloadImpl,
+      readTextImpl: env.readTextImpl,
+      state: {
+        checked: {},
+        lastImageDataUrl: '',
+        selectedFile: null,
+        requestId: 0,
+        activeSession: null,
+        sessions: [],
+        currentPlan: null,
+        rescanFile: null
+      }
     };
 
     var keyInput = doc.getElementById('mistral-key-input');
@@ -443,6 +866,122 @@
       demoBtn.addEventListener('click', function () { handleLoadDemo(ctx); });
     }
 
+    var resumeBtn = doc.getElementById('resume-session-btn');
+    if (resumeBtn) {
+      resumeBtn.addEventListener('click', function () { handleResumeSession(ctx); });
+    }
+
+    var newSessionBtn = doc.getElementById('new-session-btn');
+    if (newSessionBtn) {
+      newSessionBtn.addEventListener('click', function () { handleNewSession(ctx); });
+    }
+
+    var sessionSwitcher = doc.getElementById('session-switcher');
+    if (sessionSwitcher) {
+      sessionSwitcher.addEventListener('change', function () {
+        var id = sessionSwitcher.value;
+        if (id) handleResumeSession(ctx, id);
+      });
+    }
+
+    var rescanBtn = doc.getElementById('rescan-btn');
+    var rescanInput = doc.getElementById('rescan-photo-input');
+    if (rescanBtn && rescanInput) {
+      rescanBtn.addEventListener('click', function () {
+        if (typeof rescanInput.click === 'function') rescanInput.click();
+      });
+      rescanInput.addEventListener('change', function () {
+        var file = rescanInput.files && rescanInput.files.length ? rescanInput.files[0] : null;
+        if (!file) return;
+        ctx.state.rescanFile = file;
+        handleRescanSubmit(ctx, file).catch(function () { /* the banner already explains the failure */ });
+      });
+    }
+
+    var compareSlider = doc.getElementById('compare-slider');
+    if (compareSlider) {
+      compareSlider.addEventListener('input', function () {
+        var value = Number(compareSlider.value);
+        if (!isFinite(value)) value = 50;
+        if (value < 0) value = 0;
+        if (value > 100) value = 100;
+        var beforeImg = doc.getElementById('before-image');
+        var afterImg = doc.getElementById('after-image');
+        if (beforeImg && beforeImg.style) beforeImg.style.clipPath = 'inset(0 ' + (100 - value) + '% 0 0)';
+        if (afterImg && afterImg.style) afterImg.style.clipPath = 'inset(0 0 0 ' + value + '%)';
+      });
+    }
+
+    var printBtn = doc.getElementById('print-btn');
+    if (printBtn) {
+      printBtn.addEventListener('click', function () {
+        var doPrint = ctx.printImpl;
+        if (!doPrint && typeof window !== 'undefined' && typeof window.print === 'function') {
+          doPrint = function () { window.print(); };
+        }
+        if (!doPrint) {
+          renderStatusBanner(doc, { code: 'PRINT_UNAVAILABLE' });
+          return;
+        }
+        doPrint();
+      });
+    }
+
+    var copyBtn = doc.getElementById('copy-md-btn');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', function () {
+        var plan = ctx.state.currentPlan;
+        if (!plan) {
+          renderStatusBanner(doc, { code: 'NO_PLAN' });
+          return;
+        }
+        var markdown = exporter.formatPlanAsMarkdown(plan, ctx.state.checked);
+        exporter.copyTextToClipboard(markdown, ctx.clipboard)
+          .then(function () { renderStatusBanner(doc, { code: 'copied' }); })
+          .catch(function () { renderStatusBanner(doc, { code: 'CLIPBOARD_UNAVAILABLE' }); });
+      });
+    }
+
+    var exportBtn = doc.getElementById('export-json-btn');
+    if (exportBtn) {
+      exportBtn.addEventListener('click', function () {
+        var session = ctx.state.activeSession;
+        if (!session) {
+          renderStatusBanner(doc, { code: 'NO_SESSION' });
+          return;
+        }
+        var json;
+        try {
+          json = exporter.serializeSessionForExport(session);
+        } catch (err) {
+          renderStatusBanner(doc, { code: 'INVALID_SESSION' });
+          return;
+        }
+        var ok = exporter.downloadTextFile(
+          'room-rescue-' + session.id + '.json',
+          json,
+          'application/json',
+          { downloadImpl: ctx.downloadImpl }
+        );
+        renderStatusBanner(doc, { code: ok ? 'exported' : 'DOWNLOAD_UNAVAILABLE' });
+      });
+    }
+
+    var importBtn = doc.getElementById('import-json-btn');
+    var importInput = doc.getElementById('import-json-input');
+    if (importBtn && importInput) {
+      importBtn.addEventListener('click', function () {
+        if (typeof importInput.click === 'function') importInput.click();
+      });
+      importInput.addEventListener('change', function () {
+        var file = importInput.files && importInput.files.length ? importInput.files[0] : null;
+        if (!file) return;
+        readTextFile(file, ctx.readTextImpl)
+          .then(function (text) { return handleImportSessionText(ctx, text); })
+          .catch(function () { /* the banner already explains the failure */ });
+      });
+    }
+
     var actionsContainer = doc.getElementById('actions-container');
     if (actionsContainer) {
       actionsContainer.addEventListener('change', function (event) {
@@ -457,9 +996,19 @@
           else row.classList.remove('is-done');
         }
         updateChecklistProgress(doc, ctx.state);
+
+        // Every tick is written straight back, so a refresh never loses progress.
+        if (ctx.state.activeSession) {
+          ctx.state.activeSession = Object.assign({}, ctx.state.activeSession, {
+            checked: Object.assign({}, ctx.state.checked),
+            updatedAt: new Date().toISOString()
+          });
+          persistActiveSession(ctx);
+        }
       });
     }
 
+    ctx.ready = loadSavedSessions(ctx);
     return ctx;
   }
 
@@ -468,8 +1017,17 @@
     renderStatusBanner: renderStatusBanner,
     renderAnalysisResult: renderAnalysisResult,
     updateChecklistProgress: updateChecklistProgress,
+    renderSessionBar: renderSessionBar,
+    renderSessionState: renderSessionState,
+    renderBeforeAfter: renderBeforeAfter,
+    persistActiveSession: persistActiveSession,
+    loadSavedSessions: loadSavedSessions,
     handleLoadDemo: handleLoadDemo,
     handleAnalyzeSubmit: handleAnalyzeSubmit,
+    handleResumeSession: handleResumeSession,
+    handleNewSession: handleNewSession,
+    handleRescanSubmit: handleRescanSubmit,
+    handleImportSessionText: handleImportSessionText,
     ERROR_COPY: ERROR_COPY
   };
 

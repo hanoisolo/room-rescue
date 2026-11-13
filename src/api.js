@@ -121,15 +121,47 @@
     return canvas;
   }
 
-  function downscaleImageFile(file, envDeps) {
+  function downscaleDataUrl(sourceDataUrl, envDeps) {
     var deps = envDeps || {};
-    var readFile = deps.readFile || readFileAsDataUrl;
     var createImage = deps.createImage || createImageElement;
     var createCanvas = deps.createCanvas || createCanvasElement;
     var maxEdge = deps.maxEdge || core.IMAGE_MAX_EDGE_PX;
     var quality = typeof deps.quality === 'number' ? deps.quality : core.IMAGE_JPEG_QUALITY;
     var fallbackQuality = typeof deps.fallbackQuality === 'number' ? deps.fallbackQuality : core.IMAGE_JPEG_FALLBACK_QUALITY;
     var maxBytes = deps.maxBytes || core.MAX_PAYLOAD_BYTES;
+
+    if (typeof sourceDataUrl !== 'string' || sourceDataUrl.indexOf('data:image/') !== 0) {
+      return Promise.reject(new RoomRescueError('UNSUPPORTED_IMAGE', 'The room photo must be a JPEG, PNG, or WebP image.'));
+    }
+
+    return Promise.resolve(createImage(sourceDataUrl)).then(function (image) {
+      var dims = core.computeDownscaleDimensions(image.width, image.height, maxEdge);
+      var canvas = createCanvas(dims.width, dims.height);
+      var context = canvas.getContext('2d');
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, dims.width, dims.height);
+      context.drawImage(image, 0, 0, dims.width, dims.height);
+
+      var dataUrl = canvas.toDataURL('image/jpeg', quality);
+      try {
+        core.validateImagePayload(dataUrl, maxBytes);
+      } catch (err) {
+        dataUrl = canvas.toDataURL('image/jpeg', fallbackQuality);
+        core.validateImagePayload(dataUrl, maxBytes);
+      }
+
+      return {
+        dataUrl: dataUrl,
+        width: dims.width,
+        height: dims.height,
+        wasDownscaled: dims.wasDownscaled
+      };
+    });
+  }
+
+  function downscaleImageFile(file, envDeps) {
+    var deps = envDeps || {};
+    var readFile = deps.readFile || readFileAsDataUrl;
     var maxRawBytes = deps.maxRawBytes || core.MAX_RAW_FILE_BYTES;
 
     return Promise.resolve()
@@ -139,30 +171,8 @@
         return readFile(file);
       })
       .then(function (sourceDataUrl) {
-      return Promise.resolve(createImage(sourceDataUrl)).then(function (image) {
-        var dims = core.computeDownscaleDimensions(image.width, image.height, maxEdge);
-        var canvas = createCanvas(dims.width, dims.height);
-        var context = canvas.getContext('2d');
-        context.fillStyle = '#ffffff';
-        context.fillRect(0, 0, dims.width, dims.height);
-        context.drawImage(image, 0, 0, dims.width, dims.height);
-
-        var dataUrl = canvas.toDataURL('image/jpeg', quality);
-        try {
-          core.validateImagePayload(dataUrl, maxBytes);
-        } catch (err) {
-          dataUrl = canvas.toDataURL('image/jpeg', fallbackQuality);
-          core.validateImagePayload(dataUrl, maxBytes);
-        }
-
-        return {
-          dataUrl: dataUrl,
-          width: dims.width,
-          height: dims.height,
-          wasDownscaled: dims.wasDownscaled
-        };
+        return downscaleDataUrl(sourceDataUrl, deps);
       });
-    });
   }
 
   function extractErrorMessage(body) {
@@ -221,14 +231,18 @@
     }).then(readJsonResponse);
   }
 
-  function callMistralLarge4(imageDataUrl, ocrSummary, roomHint, mistralKey, fetchImpl) {
+  function callMistralLarge4(imageDataUrl, ocrSummary, roomHint, mistralKey, fetchImpl, options) {
     if (!mistralKey) {
       return Promise.reject(new RoomRescueError('MISSING_KEY', 'Paste your Mistral API key to analyze a room.'));
     }
     var doFetch = fetchImpl || defaultFetch;
+    var rescan = options && options.rescan ? options.rescan : null;
 
     function send(mode) {
-      var body = core.buildLarge4Request(imageDataUrl, ocrSummary, roomHint, { responseFormatMode: mode });
+      var body = core.buildLarge4Request(imageDataUrl, ocrSummary, roomHint, {
+        responseFormatMode: mode,
+        rescan: rescan
+      });
       return safeFetch(doFetch, core.MISTRAL_CHAT_ENDPOINT, {
         method: 'POST',
         headers: authHeaders(mistralKey),
@@ -249,6 +263,8 @@
     var fetchImpl = opts.fetchImpl;
     var onStage = typeof opts.onStage === 'function' ? opts.onStage : function () {};
     var downscaleImpl = opts.downscaleImpl || downscaleImageFile;
+    var downscaleDataUrlImpl = opts.downscaleDataUrlImpl || downscaleDataUrl;
+    var previousScan = opts.previousScan && typeof opts.previousScan === 'object' ? opts.previousScan : null;
     var maxPayloadBytes = typeof opts.maxPayloadBytes === 'number' && opts.maxPayloadBytes > 0
       ? opts.maxPayloadBytes
       : core.MAX_PAYLOAD_BYTES;
@@ -278,24 +294,46 @@
       core.validateImagePayload(image.dataUrl, maxPayloadBytes);
       onStage('ocr');
 
-      return callMistralOcr(image.dataUrl, mistralKey, fetchImpl)
-        .then(function (ocrResponse) { return core.normalizeOcrResult(ocrResponse); })
-        .catch(function (err) {
-          var fatal = err instanceof RoomRescueError &&
-            (err.code === 'AUTH_INVALID' || err.code === 'RATE_LIMITED' || err.code === 'NETWORK_ERROR' || err.code === 'MISSING_KEY');
-          if (fatal) throw err;
-          return { hasText: false, status: 'ocr_unavailable', cleanedText: '', lineCount: 0, pageConfidence: null };
-        })
-        .then(function (ocrSummary) {
-          onStage('vision');
-          return callMistralLarge4(image.dataUrl, ocrSummary, opts.roomHint, mistralKey, fetchImpl)
-            .then(function (chatResponse) {
-              var text = core.extractAssistantText(chatResponse);
-              var raw = core.parseTolerantJson(text);
-              onStage('done');
-              return core.normalizeAndRankPlan(raw, ocrSummary, { isDemo: false });
-            });
-        });
+      // The previous photo is shrunk to a small edge first: it only has to prove
+      // what changed, and a failure there must never block the new analysis.
+      var previousImagePromise = previousScan && typeof previousScan.imageDataUrl === 'string' && previousScan.imageDataUrl
+        ? Promise.resolve()
+            .then(function () {
+              return downscaleDataUrlImpl(previousScan.imageDataUrl, { maxEdge: core.RESCAN_PREV_MAX_EDGE_PX });
+            })
+            .then(function (result) { return result && result.dataUrl ? result.dataUrl : ''; })
+            .catch(function () { return ''; })
+        : Promise.resolve('');
+
+      return previousImagePromise.then(function (previousImageDataUrl) {
+        return callMistralOcr(image.dataUrl, mistralKey, fetchImpl)
+          .then(function (ocrResponse) { return core.normalizeOcrResult(ocrResponse); })
+          .catch(function (err) {
+            var fatal = err instanceof RoomRescueError &&
+              (err.code === 'AUTH_INVALID' || err.code === 'RATE_LIMITED' || err.code === 'NETWORK_ERROR' || err.code === 'MISSING_KEY');
+            if (fatal) throw err;
+            return { hasText: false, status: 'ocr_unavailable', cleanedText: '', lineCount: 0, pageConfidence: null };
+          })
+          .then(function (ocrSummary) {
+            onStage('vision');
+            var rescan = previousScan
+              ? {
+                  previousImageDataUrl: previousImageDataUrl,
+                  context: core.buildRescanContext(previousScan, previousScan.checked || {})
+                }
+              : null;
+
+            return callMistralLarge4(image.dataUrl, ocrSummary, opts.roomHint, mistralKey, fetchImpl, { rescan: rescan })
+              .then(function (chatResponse) {
+                var text = core.extractAssistantText(chatResponse);
+                var raw = core.parseTolerantJson(text);
+                onStage('done');
+                var plan = core.normalizeAndRankPlan(raw, ocrSummary, { isDemo: false });
+                if (!previousScan) return plan;
+                return core.reconcileRescanPlan(plan, previousScan, previousScan.checked || {});
+              });
+          });
+      });
     });
   }
 
@@ -306,6 +344,7 @@
     clearMistralKey: clearMistralKey,
     validateRawFile: validateRawFile,
     downscaleImageFile: downscaleImageFile,
+    downscaleDataUrl: downscaleDataUrl,
     mapHttpError: mapHttpError,
     callMistralOcr: callMistralOcr,
     callMistralLarge4: callMistralLarge4,

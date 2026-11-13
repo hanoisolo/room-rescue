@@ -14,6 +14,9 @@
   var MAX_RAW_FILE_BYTES = 26214400;
   var MAX_PAYLOAD_BYTES = 4194304;
   var MAX_OCR_CHARS = 4000;
+  // The previous photo only has to prove what changed, so it rides at a much
+  // smaller edge than the current photo and costs almost no vision budget.
+  var RESCAN_PREV_MAX_EDGE_PX = 512;
 
   var STORAGE_KEY_NAME = 'room_rescue_mistral_credential';
   var LARGE4_TEMPERATURE = 0.2;
@@ -254,7 +257,7 @@
       .replace(/>/g, '&gt;');
   }
 
-  function buildVisionPrompt(ocrSummary, roomHint, mode) {
+  function buildVisionPrompt(ocrSummary, roomHint, mode, rescanContext) {
     var parts = [];
     parts.push('You are a professional home organizer analyzing a photograph of a room.');
     parts.push('Inspect the room image directly. Identify the zones (surfaces, storage areas, floor areas), the clutter density, and the specific items creating visual noise.');
@@ -266,6 +269,19 @@
     parts.push('- 3-5 min: clearing a small surface into a staging bin, coiling 2-4 cables, or wiping down a cleared area.');
     parts.push('- 10-20 min: high-cognitive-load work that involves reading, sorting, or keep-or-toss decisions across a pile of loose papers or mixed containers.');
     parts.push('- Never round a step up to 5 or 10 minutes to look tidy. An action that takes under a minute is 1 minute.');
+
+    if (rescanContext) {
+      parts.push('Image 1 is the NEW current photo of the room. Image 2 is the PREVIOUS photo from the earlier checkpoint.');
+      parts.push('<previous_scan_progress>');
+      parts.push(escapeForPrompt(JSON.stringify(rescanContext)));
+      parts.push('</previous_scan_progress>');
+      parts.push('Compare Image 1 against Image 2 and the checkpoint state above, then follow these rules:');
+      parts.push('- Acknowledge the completed progress in summary, naming what is visibly cleared between Image 2 and Image 1.');
+      parts.push('- Drop any action_plan step that is visibly resolved in Image 1.');
+      parts.push('- For every remaining task that is still visibly unresolved in Image 1, carry it over into action_plan and keep its exact existing step_id.');
+      parts.push('- Give newly exposed or newly identified work a fresh step_id that collides with no existing step_id.');
+      parts.push('- Produce a new quick_win aimed at the newly exposed layer or the highest-impact remaining area.');
+    }
 
     if (ocrSummary.hasText && ocrSummary.cleanedText) {
       parts.push('<ocr_detected_labels status="grounded">');
@@ -290,10 +306,29 @@
       throw coreError('UNSUPPORTED_IMAGE', 'The room photo must be a JPEG, PNG, or WebP image.');
     }
 
+    var rescan = opts.rescan && typeof opts.rescan === 'object' ? opts.rescan : null;
+    var previousImage = '';
+    if (rescan) {
+      var rawPrevious = rescan.previousImageDataUrl;
+      if (rawPrevious !== undefined && rawPrevious !== null && rawPrevious !== '') {
+        if (typeof rawPrevious !== 'string' || rawPrevious.indexOf('data:image/') !== 0) {
+          throw coreError('UNSUPPORTED_IMAGE', 'The previous room photo must be a JPEG, PNG, or WebP image.');
+        }
+        previousImage = rawPrevious;
+      }
+    }
+
     var summary = ocrSummary && typeof ocrSummary === 'object'
       ? ocrSummary
       : { hasText: false, status: 'ocr_empty', cleanedText: '', lineCount: 0, pageConfidence: null };
     var hint = asText(roomHint, 'Auto-detect the room type from the image.');
+
+    var content = [{ type: 'image_url', image_url: imageDataUrl }];
+    if (previousImage) content.push({ type: 'image_url', image_url: previousImage });
+    content.push({
+      type: 'text',
+      text: buildVisionPrompt(summary, hint, mode, rescan ? rescan.context : null)
+    });
 
     return {
       model: MISTRAL_VISION_MODEL,
@@ -301,10 +336,7 @@
       messages: [
         {
           role: 'user',
-          content: [
-            { type: 'image_url', image_url: imageDataUrl },
-            { type: 'text', text: buildVisionPrompt(summary, hint, mode) }
-          ]
+          content: content
         }
       ],
       response_format: mode === 'json_object'
@@ -512,6 +544,152 @@
     };
   }
 
+  // --- Progress re-scans --------------------------------------------------
+
+  function buildRescanContext(previousScan, checkedMap) {
+    var scan = previousScan && typeof previousScan === 'object' ? previousScan : {};
+    var plan = scan.plan && typeof scan.plan === 'object' ? scan.plan : {};
+    var steps = Array.isArray(plan.action_plan) ? plan.action_plan : [];
+    var checked = checkedMap && typeof checkedMap === 'object' ? checkedMap : {};
+
+    var completed = [];
+    var remaining = [];
+    for (var i = 0; i < steps.length; i++) {
+      var step = steps[i];
+      if (!step || typeof step !== 'object') continue;
+      var id = typeof step.step_id === 'string' ? step.step_id : '';
+      if (!id) continue;
+      if (checked[id]) {
+        completed.push({ step_id: id, zone_id: asText(step.zone_id, ''), action: asText(step.action, '') });
+      } else {
+        remaining.push({
+          step_id: id,
+          zone_id: asText(step.zone_id, ''),
+          action: asText(step.action, ''),
+          priority: asEnum(step.priority, PRIORITIES, 'medium')
+        });
+      }
+    }
+
+    return {
+      previous_clutter_level: asEnum(plan.clutter_level, CLUTTER_LEVELS, 'moderate'),
+      completed_tasks: completed,
+      remaining_tasks: remaining
+    };
+  }
+
+  function normalizeActionText(value) {
+    return typeof value === 'string' ? value.trim().toLowerCase() : '';
+  }
+
+  // The model is asked to keep step ids, but a model that renumbers or repeats an
+  // id would silently move a tick onto the wrong step. This reconciles the ids on
+  // the client so checklist progress can never be lost or misapplied.
+  function reconcileRescanPlan(newPlan, previousScan, checkedMap) {
+    var plan = newPlan && typeof newPlan === 'object' ? newPlan : {};
+    var steps = Array.isArray(plan.action_plan) ? plan.action_plan : [];
+    var scan = previousScan && typeof previousScan === 'object' ? previousScan : {};
+    var previousPlan = scan.plan && typeof scan.plan === 'object' ? scan.plan : {};
+    var previousSteps = Array.isArray(previousPlan.action_plan) ? previousPlan.action_plan : [];
+    var checked = checkedMap && typeof checkedMap === 'object' ? checkedMap : {};
+
+    var used = {};
+    var remainingById = {};
+    var remainingOrder = [];
+
+    for (var i = 0; i < previousSteps.length; i++) {
+      var previous = previousSteps[i];
+      if (!previous || typeof previous !== 'object') continue;
+      var previousId = typeof previous.step_id === 'string' ? previous.step_id : '';
+      if (!previousId) continue;
+      if (checked[previousId]) {
+        used[previousId] = true;
+      } else if (!remainingById[previousId]) {
+        remainingById[previousId] = previous;
+        remainingOrder.push(previousId);
+      }
+    }
+
+    var claimed = {};
+    var assigned = [];
+
+    // Pass 1: an id the model kept maps straight back to the original remaining step.
+    for (var a = 0; a < steps.length; a++) {
+      var step = steps[a];
+      if (!step || typeof step !== 'object') continue;
+      var id = typeof step.step_id === 'string' ? step.step_id : '';
+      if (id && remainingById[id] && !claimed[id] && !used[id]) {
+        claimed[id] = true;
+        used[id] = true;
+        assigned.push({ step: step, step_id: id });
+      } else {
+        assigned.push({ step: step, step_id: null });
+      }
+    }
+
+    // Pass 1b: a renumbered but otherwise identical action gets its original id back.
+    for (var b = 0; b < assigned.length; b++) {
+      if (assigned[b].step_id) continue;
+      var candidate = assigned[b].step;
+      var text = normalizeActionText(candidate.action);
+      if (!text) continue;
+      var zone = asText(candidate.zone_id, '');
+      var match = null;
+      for (var c = 0; c < remainingOrder.length; c++) {
+        var remainingId = remainingOrder[c];
+        if (claimed[remainingId] || used[remainingId]) continue;
+        var remainingStep = remainingById[remainingId];
+        if (normalizeActionText(remainingStep.action) !== text) continue;
+        if (!match) match = remainingId;
+        if (zone && asText(remainingStep.zone_id, '') === zone) {
+          match = remainingId;
+          break;
+        }
+      }
+      if (match) {
+        claimed[match] = true;
+        used[match] = true;
+        assigned[b].step_id = match;
+      }
+    }
+
+    // Pass 2: everything left is new work. A fresh id can never collide with a
+    // completed id, nor with a remaining id that was not carried over.
+    var counter = 1;
+    for (var d = 0; d < assigned.length; d++) {
+      if (assigned[d].step_id) continue;
+      var raw = typeof assigned[d].step.step_id === 'string' ? assigned[d].step.step_id : '';
+      if (raw && !used[raw] && !remainingById[raw]) {
+        used[raw] = true;
+        assigned[d].step_id = raw;
+        continue;
+      }
+      while (used['step_' + counter] || remainingById['step_' + counter]) counter += 1;
+      var fresh = 'step_' + counter;
+      used[fresh] = true;
+      assigned[d].step_id = fresh;
+      counter += 1;
+    }
+
+    var reconciled = [];
+    for (var e = 0; e < assigned.length; e++) {
+      var source = assigned[e].step;
+      reconciled.push({
+        step_id: assigned[e].step_id,
+        zone_id: asText(source.zone_id, ''),
+        action: asText(source.action, ''),
+        priority: asEnum(source.priority, PRIORITIES, 'medium'),
+        impact: asEnum(source.impact, PRIORITIES, 'medium'),
+        estimated_minutes: asMinutes(source.estimated_minutes, 10)
+      });
+    }
+
+    var out = {};
+    Object.keys(plan).forEach(function (key) { out[key] = plan[key]; });
+    out.action_plan = reconciled;
+    return out;
+  }
+
   var api = {
     MISTRAL_OCR_ENDPOINT: MISTRAL_OCR_ENDPOINT,
     MISTRAL_CHAT_ENDPOINT: MISTRAL_CHAT_ENDPOINT,
@@ -523,6 +701,7 @@
     MAX_RAW_FILE_BYTES: MAX_RAW_FILE_BYTES,
     MAX_PAYLOAD_BYTES: MAX_PAYLOAD_BYTES,
     MAX_OCR_CHARS: MAX_OCR_CHARS,
+    RESCAN_PREV_MAX_EDGE_PX: RESCAN_PREV_MAX_EDGE_PX,
     STORAGE_KEY_NAME: STORAGE_KEY_NAME,
     LARGE4_TEMPERATURE: LARGE4_TEMPERATURE,
     ROOM_RESCUE_SCHEMA: ROOM_RESCUE_SCHEMA,
@@ -537,7 +716,9 @@
     parseTolerantJson: parseTolerantJson,
     rankZones: rankZones,
     rankActionPlan: rankActionPlan,
-    normalizeAndRankPlan: normalizeAndRankPlan
+    normalizeAndRankPlan: normalizeAndRankPlan,
+    buildRescanContext: buildRescanContext,
+    reconcileRescanPlan: reconcileRescanPlan
   };
 
   if (typeof module === 'object' && module.exports) module.exports = api;
