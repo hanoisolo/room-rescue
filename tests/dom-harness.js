@@ -11,7 +11,7 @@ const RENDER_IDS = [
   'progress-panel', 'status-banner', 'results-section', 'preview-image', 'grounding-badge',
   'ocr-details-drawer', 'summary-card', 'quick-win-card', 'checklist-progress',
   'actions-container', 'zones-container', 'items-container',
-  'summary-text', 'clutter-level', 'total-minutes', 'quick-win-title', 'quick-win-why', 'ocr-text'
+  'summary-text', 'clutter-level', 'total-minutes', 'remaining-minutes', 'quick-win-title', 'quick-win-why', 'ocr-text'
 ];
 
 // Regions that index.html ships hidden until there is something to show.

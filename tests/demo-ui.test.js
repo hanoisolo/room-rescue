@@ -87,6 +87,29 @@ test('demo_fixture_matches_the_live_render_contract', function () {
   assert.ok(labelled.length >= 2, 'the fixture must exercise the OCR-grounded item path');
 });
 
+test('demo_fixture_uses_realistic_effort_and_never_relabels_a_labelled_box', function () {
+  const plan = demo.getDemoFixture().plan;
+
+  assert.equal(plan.total_estimated_minutes, 27, 'the sample total must be the sum of realistic step times');
+
+  const byId = {};
+  plan.action_plan.forEach(function (step) { byId[step.step_id] = step; });
+  assert.equal(byId.s1.estimated_minutes, 5);
+  assert.equal(byId.s2.estimated_minutes, 15);
+  assert.equal(byId.s3.estimated_minutes, 2);
+  assert.equal(byId.s4.estimated_minutes, 2);
+  assert.equal(byId.s5.estimated_minutes, 3);
+
+  assert.match(byId.s3.action, /TAX DOCS 2023/, 'the step must quote the label OCR already read');
+  assert.equal(/\blabel\b/i.test(byId.s3.action), false, 'the box is already labelled, so the step must not ask for it again');
+
+  const taxItem = plan.items.filter(function (item) { return item.name === 'Tax documents box'; })[0];
+  assert.ok(taxItem, 'the fixture must keep the tax box item');
+  assert.match(taxItem.suggestion, /TAX DOCS 2023/);
+  assert.equal(/label(led)? archive box/i.test(taxItem.suggestion), false, 'the suggestion must not send the user to label it');
+  assert.equal(/\blabel it\b/i.test(taxItem.suggestion), false);
+});
+
 test('checklist_checkbox_updates_completion_progress', function () {
   const env = boot();
   const doc = env.doc;
@@ -110,6 +133,84 @@ test('checklist_checkbox_updates_completion_progress', function () {
 
   assert.equal(firstRow.classList.contains('is-done'), false);
   assert.equal(doc.getElementById('checklist-progress').textContent, '0 of 5 steps done');
+});
+
+function syntheticPlan(steps, reportedTotal) {
+  return {
+    room_type: 'Bedroom',
+    clutter_level: 'moderate',
+    summary: 'A chair covered in clothes.',
+    quick_win: { title: 'Clear the chair', estimated_minutes: 5, why_first: 'It is the easiest visible win.' },
+    zones: [],
+    items: [],
+    action_plan: steps,
+    total_estimated_minutes: reportedTotal,
+    meta: {
+      grounding_mode: 'vision_plus_ocr',
+      ocr_status: 'ocr_grounded',
+      ocr_text: 'LAUNDRY',
+      ocr_line_count: 1,
+      ocr_page_confidence: 0.9,
+      is_demo: false
+    }
+  };
+}
+
+test('remaining_minutes_counts_down_as_steps_are_checked_off', function () {
+  const env = boot();
+  const doc = env.doc;
+  doc.getElementById('load-demo-btn').click();
+
+  assert.equal(doc.getElementById('total-minutes').textContent, '27 min');
+  assert.equal(doc.getElementById('remaining-minutes').textContent, '27 min left');
+
+  const container = doc.getElementById('actions-container');
+
+  function rowFor(stepId) {
+    return container.children.filter(function (row) {
+      return row.getAttribute('data-step-id') === stepId;
+    })[0];
+  }
+
+  function toggle(stepId, checked) {
+    const box = rowFor(stepId).children[0];
+    box.checked = checked;
+    container.dispatch('change', { target: box });
+  }
+
+  toggle('s3', true);
+  assert.equal(doc.getElementById('remaining-minutes').textContent, '25 min left');
+  assert.equal(doc.getElementById('checklist-progress').textContent, '1 of 5 steps done');
+  assert.equal(doc.getElementById('total-minutes').textContent, '27 min', 'the total must not shrink as steps are done');
+
+  ['s1', 's2', 's4', 's5'].forEach(function (id) { toggle(id, true); });
+  assert.equal(doc.getElementById('remaining-minutes').textContent, '0 min left');
+  assert.equal(doc.getElementById('checklist-progress').textContent, '5 of 5 steps done');
+
+  toggle('s3', false);
+  assert.equal(doc.getElementById('remaining-minutes').textContent, '2 min left');
+});
+
+test('header_total_is_derived_from_the_steps_not_the_reported_total', function () {
+  const doc = harness.createFakeDocument(REQUIRED_IDS);
+  const plan = syntheticPlan([
+    { step_id: 'a', zone_id: 'z1', action: 'Move the basket.', priority: 'high', impact: 'high', estimated_minutes: 4 },
+    { step_id: 'b', zone_id: 'z1', action: 'Hang the coat.', priority: 'low', impact: 'low', estimated_minutes: 3 }
+  ], 99);
+
+  app.renderAnalysisResult(doc, plan, 'data:image/jpeg;base64,AAAA', { checked: {} });
+
+  assert.equal(doc.getElementById('total-minutes').textContent, '7 min');
+  assert.equal(doc.getElementById('remaining-minutes').textContent, '7 min left');
+});
+
+test('empty_action_plan_renders_no_effort_figures', function () {
+  const doc = harness.createFakeDocument(REQUIRED_IDS);
+
+  app.renderAnalysisResult(doc, syntheticPlan([], 40), '', { checked: {} });
+
+  assert.equal(doc.getElementById('total-minutes').textContent, '—');
+  assert.equal(doc.getElementById('remaining-minutes').textContent, '—');
 });
 
 test('init_app_is_idempotent_per_document', function () {

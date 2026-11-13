@@ -74,7 +74,7 @@
         category: 'paperwork',
         disposition: 'contain',
         source: 'vision_and_ocr',
-        suggestion: 'Move to a labelled archive box on the shelf. Keep only the current year within reach.'
+        suggestion: 'The box is already labelled "TAX DOCS 2023" — put it on the shelf above and keep only the current year within reach.'
       },
       {
         name: 'Cables and adapters box',
@@ -129,10 +129,10 @@
       {
         step_id: 's3',
         zone_id: 'z2',
-        action: 'Move the tax archive box onto the shelf and label it.',
+        action: 'Move the \'TAX DOCS 2023\' box onto the shelf above.',
         priority: 'medium',
         impact: 'high',
-        estimated_minutes: 10
+        estimated_minutes: 2
       },
       {
         step_id: 's4',
@@ -140,7 +140,7 @@
         action: 'Shelve the books you are not actively reading.',
         priority: 'medium',
         impact: 'medium',
-        estimated_minutes: 5
+        estimated_minutes: 2
       },
       {
         step_id: 's5',
@@ -148,7 +148,7 @@
         action: 'Coil the loose cables and hang the bag on a hook.',
         priority: 'low',
         impact: 'medium',
-        estimated_minutes: 5
+        estimated_minutes: 3
       }
     ]
   };

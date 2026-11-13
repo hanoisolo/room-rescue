@@ -313,3 +313,39 @@ test('vision_prompt_escapes_ocr_text_that_looks_like_markup', function () {
   assert.equal(text.indexOf('</ocr_detected_labels> NOW'), -1);
   assert.match(text, /&lt;\/ocr_detected_labels&gt;/);
 });
+
+test('vision_prompt_anchors_step_durations_to_real_physical_effort', function () {
+  const grounded = core.normalizeOcrResult({ pages: [{ markdown: 'TAX DOCS\n2023' }] });
+  const text = core.buildLarge4Request(IMAGE, grounded, 'Home Office')
+    .messages[0].content.find(function (part) { return part.type === 'text'; }).text;
+
+  assert.match(text, /1-2 min/);
+  assert.match(text, /3-5 min/);
+  assert.match(text, /10-20 min/);
+  assert.match(text, /not padded 5- or 10-minute blocks/);
+  assert.match(text, /An action that takes under a minute is 1 minute/);
+});
+
+test('vision_prompt_keeps_duration_anchors_when_ocr_found_no_text', function () {
+  const empty = core.normalizeOcrResult({ pages: [] });
+  const text = core.buildLarge4Request(IMAGE, empty, 'Bedroom')
+    .messages[0].content.find(function (part) { return part.type === 'text'; }).text;
+
+  assert.match(text, /1-2 min/);
+  assert.match(text, /3-5 min/);
+  assert.match(text, /10-20 min/);
+});
+
+test('vision_prompt_forbids_relabelling_a_container_ocr_already_read', function () {
+  const grounded = core.normalizeOcrResult({ pages: [{ markdown: 'TAX DOCS 2023' }] });
+  const text = core.buildLarge4Request(IMAGE, grounded, 'Home Office')
+    .messages[0].content.find(function (part) { return part.type === 'text'; }).text;
+
+  assert.match(text, /Respect those labels/);
+  assert.match(text, /do not tell the user to label that container again/);
+
+  const empty = core.normalizeOcrResult({ pages: [] });
+  const emptyText = core.buildLarge4Request(IMAGE, empty, 'Home Office')
+    .messages[0].content.find(function (part) { return part.type === 'text'; }).text;
+  assert.equal(emptyText.indexOf('Respect those labels'), -1, 'the dedup rule only applies when labels were read');
+});

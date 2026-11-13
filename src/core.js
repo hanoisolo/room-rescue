@@ -260,12 +260,19 @@
     parts.push('Inspect the room image directly. Identify the zones (surfaces, storage areas, floor areas), the clutter density, and the specific items creating visual noise.');
     parts.push('Room context supplied by the user: ' + roomHint);
     parts.push('Return at most 6 zones, 12 items, and 8 action_plan steps. Keep every text field to 1-2 concise sentences.');
+    parts.push('Duration and realism rules for estimated_minutes:');
+    parts.push('- Estimate realistic physical execution time in whole minutes, not padded 5- or 10-minute blocks.');
+    parts.push('- 1-2 min: relocating a single object, shelving a small stack of books, tossing obvious trash, or placing an already-labelled box onto an open shelf.');
+    parts.push('- 3-5 min: clearing a small surface into a staging bin, coiling 2-4 cables, or wiping down a cleared area.');
+    parts.push('- 10-20 min: high-cognitive-load work that involves reading, sorting, or keep-or-toss decisions across a pile of loose papers or mixed containers.');
+    parts.push('- Never round a step up to 5 or 10 minutes to look tidy. An action that takes under a minute is 1 minute.');
 
     if (ocrSummary.hasText && ocrSummary.cleanedText) {
       parts.push('<ocr_detected_labels status="grounded">');
       parts.push(escapeForPrompt(ocrSummary.cleanedText));
       parts.push('</ocr_detected_labels>');
       parts.push('The labels above were read from the photograph. Use them to name specific items, and set source to "vision_and_ocr" for any item you can tie to a label.');
+      parts.push('Respect those labels: when a detected label already names a container (for example "TAX DOCS 2023"), quote that label in the step and do not tell the user to label that container again.');
     } else {
       parts.push('<ocr_detected_labels status="none">');
       parts.push('No readable text was detected in this photograph. Rely entirely on direct visual inspection of the image. Do not invent or guess printed labels, brand names, or text you cannot actually see.');

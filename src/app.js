@@ -110,6 +110,36 @@
     });
     var done = rows.filter(function (row) { return row.classList.contains('is-done'); }).length;
     progress.textContent = done + ' of ' + rows.length + ' steps done';
+
+    var remaining = doc.getElementById('remaining-minutes');
+    if (!remaining) return;
+    if (!rows.length) {
+      remaining.textContent = '—';
+      return;
+    }
+    var left = 0;
+    rows.forEach(function (row) {
+      if (row.classList.contains('is-done')) return;
+      left += stepMinutes({ estimated_minutes: row.getAttribute('data-minutes') });
+    });
+    remaining.textContent = left + ' min left';
+  }
+
+  // The header total is derived from the steps themselves, so a model that
+  // reports its own total cannot drift out of sync with the checklist.
+  function stepMinutes(step) {
+    var raw = step && step.estimated_minutes;
+    if (raw === null || raw === undefined || raw === '' || typeof raw === 'boolean') return 0;
+    var n = Number(raw);
+    if (!isFinite(n) || n < 0) return 0;
+    return Math.round(n);
+  }
+
+  function computePlanTotalMinutes(plan) {
+    var steps = plan && Array.isArray(plan.action_plan) ? plan.action_plan : [];
+    var total = 0;
+    for (var i = 0; i < steps.length; i++) total += stepMinutes(steps[i]);
+    return total;
   }
 
   function renderActions(doc, plan, state) {
@@ -122,8 +152,10 @@
       return;
     }
     actions.forEach(function (step) {
+      var mins = stepMinutes(step);
       var row = el(doc, 'div', 'action-step');
       row.setAttribute('data-step-id', step.step_id);
+      row.setAttribute('data-minutes', String(mins));
 
       var box = el(doc, 'input');
       box.setAttribute('type', 'checkbox');
@@ -133,7 +165,7 @@
 
       row.appendChild(box);
       row.appendChild(el(doc, 'p', 'action-text', step.action));
-      row.appendChild(el(doc, 'span', 'action-meta', step.estimated_minutes + ' min · ' + step.priority));
+      row.appendChild(el(doc, 'span', 'action-meta', mins + ' min · ' + step.priority));
       container.appendChild(row);
     });
   }
@@ -206,7 +238,10 @@
     if (clutter) clutter.textContent = plan.clutter_level || '—';
 
     var total = doc.getElementById('total-minutes');
-    if (total) total.textContent = plan.total_estimated_minutes ? plan.total_estimated_minutes + ' min' : '—';
+    if (total) {
+      var steps = plan.action_plan || [];
+      total.textContent = steps.length ? computePlanTotalMinutes(plan) + ' min' : '—';
+    }
 
     var quickTitle = doc.getElementById('quick-win-title');
     if (quickTitle) quickTitle.textContent = plan.quick_win.title + ' (' + plan.quick_win.estimated_minutes + ' min)';
